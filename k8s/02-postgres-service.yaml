@@ -1,0 +1,16 @@
+# A "headless" Service (clusterIP: None) gives the database a stable network
+# name — `postgres` — that the web app uses to find it. Headless is the right
+# choice for a StatefulSet: it points straight at the pod rather than load
+# balancing across many.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: lumen
+spec:
+  clusterIP: None
+  selector:
+    app: postgres        # send traffic to pods with this label
+  ports:
+    - port: 5432
+      targetPort: 5432

@@ -1,0 +1,25 @@
+
+✅ Lumen "{{ .Release.Name }}" deployed to namespace "{{ .Release.Namespace }}".
+
+1) Watch the pods come up:
+   kubectl -n {{ .Release.Namespace }} get pods -w
+
+2) Open the app:
+{{- if .Values.ingress.enabled }}
+   Browse to  http://{{ .Values.ingress.host }}
+   (map {{ .Values.ingress.host }} to your cluster IP in /etc/hosts)
+{{- else }}
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lumen.fullname" . }}-web 8080:{{ .Values.web.service.port }}
+   then visit  http://localhost:8080
+{{- end }}
+
+3) Useful:
+   helm -n {{ .Release.Namespace }} status {{ .Release.Name }}
+   helm -n {{ .Release.Namespace }} upgrade {{ .Release.Name }} . --set web.image.tag=NEW_TAG
+   helm -n {{ .Release.Namespace }} uninstall {{ .Release.Name }}
+
+{{- if eq .Values.web.image.repository "YOUR_DOCKERHUB_USERNAME/lumen-web" }}
+
+⚠  You're still using the placeholder image. Set a real one:
+   helm upgrade {{ .Release.Name }} . --set web.image.repository=YOURUSER/lumen-web --set web.image.tag=1.0
+{{- end }}

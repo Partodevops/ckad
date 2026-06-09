@@ -1,0 +1,22 @@
+# A HorizontalPodAutoscaler adds/removes web pods automatically based on CPU.
+# Needs metrics-server in the cluster (`minikube addons enable metrics-server`).
+# Relies on the cpu `requests` set in the web Deployment.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: lumen-web
+  namespace: lumen
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: lumen-web
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70   # add pods when avg CPU goes above 70%

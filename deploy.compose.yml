@@ -1,0 +1,42 @@
+# Deployment compose file — runs Lumen from a PUBLISHED image (no source code).
+#
+# Unlike docker-compose.yml (which builds from ./app), this file only `pull`s
+# the web image you pushed to a registry. Copy it to any machine with Docker and:
+#
+#   WEB_IMAGE=YOUR_DOCKERHUB_USERNAME/lumen-web:1.0 docker compose -f deploy.compose.yml up -d
+#
+# (PowerShell: set $env:WEB_IMAGE first, then run the compose command.)
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: lumen-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lumen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumen}
+      POSTGRES_DB: ${POSTGRES_DB:-lumen}
+    volumes:
+      - lumen_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lumen} -d ${POSTGRES_DB:-lumen}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  web:
+    # No `build:` here — just pull the image you published.
+    image: ${WEB_IMAGE:?set WEB_IMAGE to your pushed image, e.g. youruser/lumen-web:1.0}
+    container_name: lumen-web
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-lumen}:${POSTGRES_PASSWORD:-lumen}@db:5432/${POSTGRES_DB:-lumen}
+      PORT: 3000
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
+volumes:
+  lumen_pgdata:

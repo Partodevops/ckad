@@ -1,0 +1,45 @@
+# Two services: a Postgres database and the Lumen web app. `${VAR:-default}`
+# means "use VAR from a .env file if set, otherwise fall back to this default".
+services:
+  # ---- PostgreSQL database ----
+  db:
+    image: postgres:16-alpine
+    container_name: lumen-db
+    restart: unless-stopped
+    environment: # Postgres reads these on first boot to create the user/db
+      POSTGRES_USER: ${POSTGRES_USER:-lumen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumen}
+      POSTGRES_DB: ${POSTGRES_DB:-lumen}
+    volumes:
+      # Named volume keeps the data when containers are recreated.
+      - lumen_pgdata:/var/lib/postgresql/data
+      # Schema applied automatically the first time the volume is created.
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${DB_PORT:-5432}:5432" # expose Postgres on the host (optional)
+    healthcheck:
+      # `depends_on … service_healthy` below waits until this passes.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lumen} -d ${POSTGRES_DB:-lumen}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ---- Lumen web app (Node/Express) ----
+  web:
+    build: ./app                          # build from app/Dockerfile
+    image: ${WEB_IMAGE:-lumen-web:latest} # name for the built image (also what `docker compose push` uploads)
+    container_name: lumen-web
+    restart: unless-stopped
+    environment:
+      # `db` is the other service's hostname on the compose network.
+      DATABASE_URL: postgres://${POSTGRES_USER:-lumen}:${POSTGRES_PASSWORD:-lumen}@db:5432/${POSTGRES_DB:-lumen}
+      PORT: 3000
+    depends_on:
+      db:
+        condition: service_healthy        # don't start until Postgres is ready
+    ports:
+      - "${WEB_PORT:-3000}:3000"           # browse the app at http://localhost:3000
+
+# Declares the named volume used above so its data persists.
+volumes:
+  lumen_pgdata:

@@ -1,0 +1,59 @@
+# A StatefulSet runs the database. Unlike a Deployment, it gives the pod a
+# stable name (postgres-0) and its OWN persistent disk via volumeClaimTemplates,
+# so data survives restarts and rescheduling. That's exactly what a database needs.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: lumen
+spec:
+  serviceName: postgres   # ties to the headless Service above
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres     # must match the selector + the Service selector
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          # Pull POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB from the Secret.
+          envFrom:
+            - secretRef:
+                name: lumen-db
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata   # keep data in a subfolder (avoids lost+found issues)
+          # Readiness: is Postgres accepting connections yet? (gates traffic)
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # Liveness: if it hangs, restart the container.
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              memory: "512Mi"
+  # Kubernetes creates a PersistentVolumeClaim (a 1Gi disk) from this template.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

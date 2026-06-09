@@ -1,0 +1,6 @@
+# A Namespace is a folder for our objects, so everything Lumen-related lives
+# together and is easy to manage (or delete) as one unit.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lumen

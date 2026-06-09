@@ -1,0 +1,20 @@
+# An Ingress exposes the Service to the outside world over normal HTTP(S) and
+# routes by hostname/path. It needs an ingress controller running in the cluster
+# (e.g. `minikube addons enable ingress`, or ingress-nginx on a real cluster).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lumen
+  namespace: lumen
+spec:
+  rules:
+    - host: lumen.local          # map this name to your cluster IP in /etc/hosts
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: lumen-web   # send everything to the web Service
+                port:
+                  number: 80

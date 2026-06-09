@@ -1,0 +1,56 @@
+# Default configuration for the Lumen chart.
+# Override any of these with `--set key=value` or your own `-f my-values.yaml`.
+
+# ── Web (the Lumen app) ──────────────────────────────────────────────────────
+web:
+  image:
+    repository: YOUR_DOCKERHUB_USERNAME/lumen-web   # 👈 the image you pushed
+    tag: "1.0"
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# ── Database credentials (used by Postgres AND the web app) ───────────────────
+db:
+  user: lumen
+  password: change-me-in-production
+  name: lumen
+  # Already manage the Secret yourself? Put its name here. It must contain the
+  # keys POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB. Leave "" to let the
+  # chart create the Secret from the values above.
+  existingSecret: ""
+
+# ── Bundled PostgreSQL ───────────────────────────────────────────────────────
+postgres:
+  enabled: true            # set false to use an external database instead
+  image: postgres:16-alpine
+  storage: 1Gi
+  storageClass: ""         # "" = cluster default StorageClass
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  externalHost: ""         # used only when postgres.enabled=false (e.g. RDS host)
+
+# ── Ingress (HTTP routing from outside) ──────────────────────────────────────
+ingress:
+  enabled: false
+  className: ""            # e.g. "nginx"
+  host: lumen.local
+
+# ── Autoscaling (needs metrics-server) ───────────────────────────────────────
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70

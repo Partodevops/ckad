@@ -1,0 +1,14 @@
+apiVersion: v2
+name: lumen
+description: A beautiful task manager — Node/Express + PostgreSQL
+type: application
+
+# version  = the chart's own version (bump when you change templates)
+# appVersion = the Lumen app version this chart deploys by default
+version: 0.1.0
+appVersion: "1.0"
+
+keywords: [tasks, todo, postgres, node]
+home: https://example.com/lumen
+maintainers:
+  - name: You

@@ -1,0 +1,59 @@
+# A Deployment runs the stateless web app. It keeps `replicas` identical pods
+# alive, replaces crashed ones, and powers rolling updates + rollbacks.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lumen-web
+  namespace: lumen
+  labels:
+    app: lumen-web
+spec:
+  replicas: 2             # two pods for availability; scale freely
+  selector:
+    matchLabels:
+      app: lumen-web
+  template:
+    metadata:
+      labels:
+        app: lumen-web
+    spec:
+      containers:
+        - name: web
+          # 👇 REPLACE with the image you pushed in the main README.
+          image: YOUR_DOCKERHUB_USERNAME/lumen-web:1.0
+          ports:
+            - containerPort: 3000
+          env:
+            # Read the DB credentials from the Secret, one key at a time...
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: lumen-db, key: POSTGRES_USER } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: lumen-db, key: POSTGRES_PASSWORD } }
+            - name: POSTGRES_DB
+              valueFrom: { secretKeyRef: { name: lumen-db, key: POSTGRES_DB } }
+            # ...then assemble the connection string. Kubernetes expands $(VAR)
+            # using the env vars defined above. `postgres` is the DB Service name.
+            - name: DATABASE_URL
+              value: postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)
+            - name: PORT
+              value: "3000"
+          # Readiness: only send traffic once /api/health responds.
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Liveness: restart the pod if it stops responding.
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:        # what the pod is guaranteed (also used by the HPA)
+              cpu: "50m"
+              memory: "64Mi"
+            limits:          # hard ceiling
+              memory: "256Mi"
