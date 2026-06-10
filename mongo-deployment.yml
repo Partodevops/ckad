@@ -1,0 +1,325 @@
+# ============================================================
+# Full MongoDB + Mongo Express Kubernetes Manifest
+# Namespace: ckad
+#
+# Includes:
+# - Namespace
+# - Secret
+# - ConfigMap
+# - MongoDB StatefulSet
+# - MongoDB Headless Service
+# - MongoDB ClusterIP Service
+# - Mongo Express Deployment
+# - Mongo Express Service
+# - Mongo Express Ingress
+#
+# Access locally using:
+# kubectl port-forward -n ckad service/mongo-express-service 8081:8081
+# Then open:
+# http://localhost:8081
+# ============================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ckad
+  labels:
+    name: ckad
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongodb-secret
+  namespace: ckad
+type: Opaque
+stringData:
+  mongo-root-username: mongoadmin
+  mongo-root-password: securepass
+  mongodb-url: mongodb://mongoadmin:securepass@mongodb-service:27017/?authSource=admin
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb-configmap
+  namespace: ckad
+data:
+  database_host: mongodb-service
+  database_port: "27017"
+  database_name: admin
+
+---
+# ============================================================
+# Headless Service for MongoDB StatefulSet
+# Used by StatefulSet for stable network identity.
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-headless
+  namespace: ckad
+  labels:
+    app: mongodb
+spec:
+  clusterIP: None
+  selector:
+    app: mongodb
+  ports:
+    - name: mongodb
+      port: 27017
+      targetPort: 27017
+
+---
+# ============================================================
+# Normal MongoDB Service
+# Mongo Express connects to this service.
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-service
+  namespace: ckad
+  labels:
+    app: mongodb
+spec:
+  type: ClusterIP
+  selector:
+    app: mongodb
+  ports:
+    - name: mongodb
+      protocol: TCP
+      port: 27017
+      targetPort: 27017
+
+---
+# ============================================================
+# MongoDB StatefulSet
+# Better than Deployment for databases because it provides:
+# - Stable pod identity
+# - Stable storage
+# - Predictable PVC naming
+# ============================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  namespace: ckad
+  labels:
+    app: mongodb
+spec:
+  serviceName: mongodb-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: mongodb
+          image: mongo:7.0
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: mongodb
+              containerPort: 27017
+              protocol: TCP
+
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: mongo-root-username
+
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: mongo-root-password
+
+          volumeMounts:
+            - name: mongodb-data
+              mountPath: /data/db
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          startupProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 12
+
+          readinessProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+
+          livenessProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 3
+
+  volumeClaimTemplates:
+    - metadata:
+        name: mongodb-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+
+---
+# ============================================================
+# Mongo Express Service
+# Internal ClusterIP service.
+# Access locally using kubectl port-forward.
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-express-service
+  namespace: ckad
+  labels:
+    app: mongo-express
+spec:
+  type: ClusterIP
+  selector:
+    app: mongo-express
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8081
+      targetPort: 8081
+
+---
+# ============================================================
+# Mongo Express Deployment
+# Web UI for MongoDB.
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongo-express
+  namespace: ckad
+  labels:
+    app: mongo-express
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongo-express
+
+  template:
+    metadata:
+      labels:
+        app: mongo-express
+    spec:
+      containers:
+        - name: mongo-express
+          image: mongo-express:1.0.2
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8081
+              protocol: TCP
+
+          env:
+            - name: ME_CONFIG_MONGODB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: mongodb-url
+
+            - name: ME_CONFIG_BASICAUTH_USERNAME
+              value: admin
+
+            - name: ME_CONFIG_BASICAUTH_PASSWORD
+              value: adminpass
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+
+          startupProbe:
+            tcpSocket:
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 12
+
+          readinessProbe:
+            tcpSocket:
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+
+          livenessProbe:
+            tcpSocket:
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+
+---
+# ============================================================
+# Mongo Express Ingress
+# Optional.
+#
+# For Docker Desktop / local testing, port-forward is easier.
+#
+# To use Ingress:
+# 1. Make sure nginx ingress controller is installed.
+# 2. Add this to Windows hosts file:
+#    127.0.0.1 mongo.local
+#
+# Windows hosts file:
+# C:\Windows\System32\drivers\etc\hosts
+#
+# Access:
+# http://mongo.local
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mongo-express-ingress
+  namespace: ckad
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: mongo.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mongo-express-service
+                port:
+                  number: 8081
