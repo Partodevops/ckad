@@ -1,214 +1,150 @@
 #!/usr/bin/env bash
 #
-# Chapter 4 — Services, Load Balancing & Network Policies.
-#   - MetalLB     : gives LoadBalancer services a real IP (Layer 4)
-#   - ingress-nginx: routes HTTP by hostname            (Layer 7)
-#   - kube-network-policies: enforces NetworkPolicies on kindnet
-# Then deploys a sample app and proves each piece works.
+# Chapter 5 — External DNS
+#
+# ExternalDNS watches Kubernetes Services and Ingresses and creates DNS records
+# for them in a DNS provider such as Route53, Cloudflare, Google Cloud DNS, etc.
+#
+# For this local lab, we use the "inmemory" provider.
+# It does NOT call a real DNS API. Instead, it logs the DNS records it WOULD create.
+#
+# This is useful for learning ExternalDNS behavior without needing a cloud account
+# or real DNS provider credentials.
 
 set -euo pipefail
 
 source "$(dirname "$0")/../lib.sh"
 cd "$(dirname "$0")"
 
-need kubectl docker curl
+need kubectl
 need_cluster
 
-title "Chapter 4 — Services, Load Balancing & Network Policies"
+title "Chapter 5 — External DNS"
 
-# Retry helper: webhooks may need a few seconds to become ready
-retry() {
-  local n=0
-  until "$@"; do
-    n=$((n+1))
-    [ "$n" -ge 6 ] && return 1
-    sleep 5
-  done
-}
+NS="ch5"
+APP="external-dns"
 
-# ── MetalLB Layer 4 Load Balancer ─────────────────────────────────────────
-step "installing MetalLB"
+step "creating namespace ${NS}"
+kubectl create namespace "${NS}" --dry-run=client -o yaml | kubectl apply -f -
 
-MLB="$(latest_tag metallb/metallb)"
-info "version ${MLB}"
+step "deploying ExternalDNS using inmemory provider"
+ED="$(latest_tag kubernetes-sigs/external-dns)"
+info "ExternalDNS version: ${ED}"
 
-kubectl apply -f "https://raw.githubusercontent.com/metallb/metallb/${MLB}/config/manifests/metallb-native.yaml"
-
-kubectl -n metallb-system rollout status deploy/controller --timeout=180s
-
-step "giving MetalLB an IPv4 range from the kind network"
-
-# Get only IPv4 subnet from Docker kind network.
-# This avoids accidentally selecting IPv6 like fc00:f853:ccd:e793::/64.
-SUBNET="$(
-  docker network inspect kind -f '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' \
-    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/' \
-    | head -n1
-)"
-
-if [ -z "${SUBNET}" ]; then
-  echo "ERROR: No IPv4 subnet found on Docker network 'kind'."
-  echo
-  echo "Available kind network subnets:"
-  docker network inspect kind -f '{{range .IPAM.Config}}{{println .Subnet}}{{end}}'
-  echo
-  echo "Your kind network may be IPv6-only. Recreate kind with IPv4 enabled."
-  exit 1
-fi
-
-# Example:
-# SUBNET=172.18.0.0/16
-# PREFIX=172.18
-PREFIX="$(echo "$SUBNET" | awk -F. '{print $1"."$2}')"
-
-POOL_START="${PREFIX}.255.200"
-POOL_END="${PREFIX}.255.250"
-
-info "kind subnet ${SUBNET} -> MetalLB pool ${POOL_START}-${POOL_END}"
-
-POOL_FILE="$(mktemp)"
-
-cat > "$POOL_FILE" <<EOF
-apiVersion: metallb.io/v1beta1
-kind: IPAddressPool
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
 metadata:
-  name: course-pool
-  namespace: metallb-system
-spec:
-  addresses:
-    - "${POOL_START}-${POOL_END}"
+  name: ${APP}
+  namespace: ${NS}
 ---
-apiVersion: metallb.io/v1beta1
-kind: L2Advertisement
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
-  name: course-l2
-  namespace: metallb-system
+  name: ${APP}-${NS}
+rules:
+  # Core Kubernetes resources watched by ExternalDNS
+  - apiGroups: [""]
+    resources:
+      - services
+      - endpoints
+      - pods
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Required by newer Kubernetes / ExternalDNS versions
+  # Without this, ExternalDNS may crash with:
+  # endpointslices.discovery.k8s.io is forbidden
+  - apiGroups: ["discovery.k8s.io"]
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Required when using --source=ingress
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${APP}-${NS}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ${APP}-${NS}
+subjects:
+  - kind: ServiceAccount
+    name: ${APP}
+    namespace: ${NS}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP}
+  namespace: ${NS}
 spec:
-  ipAddressPools:
-    - course-pool
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${APP}
+  template:
+    metadata:
+      labels:
+        app: ${APP}
+    spec:
+      serviceAccountName: ${APP}
+      containers:
+        - name: ${APP}
+          image: registry.k8s.io/external-dns/external-dns:${ED}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --source=service
+            - --source=ingress
+            - --provider=inmemory
+            - --registry=noop
+            - --policy=upsert-only
+            - --log-level=debug
+            - --interval=10s
 EOF
 
-# Remove any broken previous attempt, then apply cleanly
-kubectl delete ipaddresspool course-pool -n metallb-system --ignore-not-found=true
-kubectl delete l2advertisement course-l2 -n metallb-system --ignore-not-found=true
+step "verifying ExternalDNS RBAC permissions"
+kubectl auth can-i list endpointslices.discovery.k8s.io \
+  --as="system:serviceaccount:${NS}:${APP}" \
+  --all-namespaces
 
-retry kubectl apply -f "$POOL_FILE"
+step "waiting for ExternalDNS rollout"
+kubectl -n "${NS}" rollout status deployment/"${APP}" --timeout=120s
 
-rm -f "$POOL_FILE"
+step "deploying a sample app/service that requests the DNS name shop.example.com"
+kubectl -n "${NS}" apply -f manifests/sample.yaml
 
-# ── ingress-nginx Layer 7 Ingress Controller ──────────────────────────────
-step "installing the NGINX ingress controller"
+step "showing deployed resources"
+kubectl -n "${NS}" get pods,svc,ingress
 
-ING="$(
-  curl -fsSL https://api.github.com/repos/kubernetes/ingress-nginx/releases \
-    | sed -n 's/.*"tag_name": *"\(controller-[^"]*\)".*/\1/p' \
-    | head -1
-)"
+step "waiting for ExternalDNS to detect the service/ingress"
+sleep 20
 
-info "version ${ING}"
-
-kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${ING}/deploy/static/provider/kind/deploy.yaml"
-
-kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=180s
-
-# ── NetworkPolicy enforcement ─────────────────────────────────────────────
-step "installing kube-network-policies so NetworkPolicies are enforced"
-
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/kube-network-policies/main/install.yaml
-
-kubectl -n kube-system rollout status ds/kube-network-policies --timeout=180s
-
-# ── Sample app ────────────────────────────────────────────────────────────
-step "deploying the sample web app and its Services"
-
-kubectl apply -f manifests/web.yaml
-kubectl apply -f manifests/ingress.yaml
-
-kubectl -n ch4 rollout status deploy/web --timeout=120s
-
-# ── Test 1: LoadBalancer ──────────────────────────────────────────────────
-step "TEST 1 — LoadBalancer service got an external IP"
-
-LB=""
-
-for i in $(seq 1 20); do
-  LB="$(
-    kubectl -n ch4 get svc web-lb \
-      -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true
-  )"
-
-  [ -n "$LB" ] && break
-
-  sleep 3
-done
-
-kubectl -n ch4 get svc web-lb
-
-if [ -n "$LB" ]; then
-  info "reaching ${LB} from inside the cluster:"
-
-  kubectl -n ch4 run lbtest \
-    --image=curlimages/curl:latest \
-    --restart=Never \
-    -i \
-    --rm \
-    --quiet \
-    -- curl -s -m 5 -o /dev/null -w "  http code: %{http_code}\n" "http://${LB}" \
-    2>/dev/null || warn "LB test skipped"
-else
-  warn "LoadBalancer service did not receive an external IP"
-fi
-
-# ── Test 2: Ingress ───────────────────────────────────────────────────────
-step "TEST 2 — Ingress routes web.local to the app"
-
-sleep 3
-
-CODE="$(
-  curl -s -m 5 -o /dev/null -w '%{http_code}' \
-    -H 'Host: web.local' \
-    http://localhost || echo '000'
-)"
-
-info "curl -H 'Host: web.local' http://localhost -> ${CODE}  200 means success"
-
-# ── Test 3: NetworkPolicy ─────────────────────────────────────────────────
-step "TEST 3 — applying NetworkPolicies, then testing who can reach web"
-
-kubectl apply -f manifests/netpol.yaml
-
-sleep 5
-
-ALLOWED="$(
-  kubectl -n ch4 run client \
-    --image=curlimages/curl:latest \
-    --labels='role=client' \
-    --restart=Never \
-    -i \
-    --rm \
-    --quiet \
-    -- sh -c 'curl -s -m 5 -o /dev/null -w "%{http_code}" http://web-clusterip || echo BLOCKED' \
-    2>/dev/null | tail -1
-)"
-
-BLOCKED="$(
-  kubectl -n ch4 run stranger \
-    --image=curlimages/curl:latest \
-    --restart=Never \
-    -i \
-    --rm \
-    --quiet \
-    -- sh -c 'curl -s -m 5 -o /dev/null -w "%{http_code}" http://web-clusterip || echo BLOCKED' \
-    2>/dev/null | tail -1
-)"
-
-info "pod labelled role=client -> ${ALLOWED}   expect 200"
-info "pod with no label        -> ${BLOCKED}   expect BLOCKED"
+step "RESULT — DNS records ExternalDNS decided to create"
+kubectl -n "${NS}" logs deployment/"${APP}" -c "${APP}" \
+  | grep -iE "shop.example.com|CREATE|record|endpoint" \
+  | tail -n 20 \
+  || warn "No matching ExternalDNS log lines yet. Re-check with: kubectl -n ${NS} logs -f deploy/${APP} -c ${APP}"
 
 title "Done"
 
-info "Open the app in your browser:"
-info "curl -H 'Host: web.local' http://localhost"
-
-info "Clean up:"
-info "./cleanup.sh"
+info "ExternalDNS is running with the inmemory provider."
+info "It will log DNS records it WOULD create, but it will not update real DNS."
+info "In production, replace --provider=inmemory with aws/cloudflare/google/etc. and provide credentials."
+info "For global load balancing across clusters, see the K8GB section in the README."
+info "Clean up: ./cleanup.sh"
