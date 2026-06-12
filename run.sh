@@ -1,150 +1,126 @@
 #!/usr/bin/env bash
 #
-# Chapter 5 — External DNS
+# Chapter 15 — Monitoring & Logging.
 #
-# ExternalDNS watches Kubernetes Services and Ingresses and creates DNS records
-# for them in a DNS provider such as Route53, Cloudflare, Google Cloud DNS, etc.
+# Metrics:
+#   kube-prometheus-stack:
+#     - Prometheus
+#     - Grafana
+#     - Alertmanager
 #
-# For this local lab, we use the "inmemory" provider.
-# It does NOT call a real DNS API. Instead, it logs the DNS records it WOULD create.
+# Logs:
+#   Loki + Promtail
 #
-# This is useful for learning ExternalDNS behavior without needing a cloud account
-# or real DNS provider credentials.
+# Both metrics and logs are viewed from Grafana.
 
 set -euo pipefail
 
 source "$(dirname "$0")/../lib.sh"
 cd "$(dirname "$0")"
 
-need kubectl
+need kubectl helm
 need_cluster
 
-title "Chapter 5 — External DNS"
+title "Chapter 15 — Monitoring & Logging"
 
-NS="ch5"
-APP="external-dns"
+warn "this chapter is resource-heavy."
+warn "give Docker Desktop at least 6GB RAM, preferably 8GB."
+warn "close other course chapters before running this."
 
-step "creating namespace ${NS}"
-kubectl create namespace "${NS}" --dry-run=client -o yaml | kubectl apply -f -
+NS="monitoring"
 
-step "deploying ExternalDNS using inmemory provider"
-ED="$(latest_tag kubernetes-sigs/external-dns)"
-info "ExternalDNS version: ${ED}"
+diagnose_grafana() {
+  warn "Grafana did not become Ready. Showing diagnostics..."
 
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: ${APP}
-  namespace: ${NS}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: ${APP}-${NS}
-rules:
-  # Core Kubernetes resources watched by ExternalDNS
-  - apiGroups: [""]
-    resources:
-      - services
-      - endpoints
-      - pods
-      - nodes
-    verbs:
-      - get
-      - list
-      - watch
+  echo
+  echo "== Pods =="
+  kubectl -n "$NS" get pods -o wide || true
 
-  # Required by newer Kubernetes / ExternalDNS versions
-  # Without this, ExternalDNS may crash with:
-  # endpointslices.discovery.k8s.io is forbidden
-  - apiGroups: ["discovery.k8s.io"]
-    resources:
-      - endpointslices
-    verbs:
-      - get
-      - list
-      - watch
+  echo
+  echo "== Grafana Deployment =="
+  kubectl -n "$NS" describe deploy kps-grafana || true
 
-  # Required when using --source=ingress
-  - apiGroups: ["networking.k8s.io"]
-    resources:
-      - ingresses
-    verbs:
-      - get
-      - list
-      - watch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: ${APP}-${NS}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: ${APP}-${NS}
-subjects:
-  - kind: ServiceAccount
-    name: ${APP}
-    namespace: ${NS}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ${APP}
-  namespace: ${NS}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: ${APP}
-  template:
-    metadata:
-      labels:
-        app: ${APP}
-    spec:
-      serviceAccountName: ${APP}
-      containers:
-        - name: ${APP}
-          image: registry.k8s.io/external-dns/external-dns:${ED}
-          imagePullPolicy: IfNotPresent
-          args:
-            - --source=service
-            - --source=ingress
-            - --provider=inmemory
-            - --registry=noop
-            - --policy=upsert-only
-            - --log-level=debug
-            - --interval=10s
-EOF
+  echo
+  echo "== Grafana Pod Description =="
+  kubectl -n "$NS" describe pod \
+    -l app.kubernetes.io/name=grafana,app.kubernetes.io/instance=kps || true
 
-step "verifying ExternalDNS RBAC permissions"
-kubectl auth can-i list endpointslices.discovery.k8s.io \
-  --as="system:serviceaccount:${NS}:${APP}" \
-  --all-namespaces
+  echo
+  echo "== Grafana Logs =="
+  kubectl -n "$NS" logs deploy/kps-grafana -c grafana --tail=120 || true
 
-step "waiting for ExternalDNS rollout"
-kubectl -n "${NS}" rollout status deployment/"${APP}" --timeout=120s
+  echo
+  echo "== Recent Events =="
+  kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -60 || true
+}
 
-step "deploying a sample app/service that requests the DNS name shop.example.com"
-kubectl -n "${NS}" apply -f manifests/sample.yaml
+step "adding Helm repositories"
 
-step "showing deployed resources"
-kubectl -n "${NS}" get pods,svc,ingress
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null
+helm repo add grafana https://grafana.github.io/helm-charts >/dev/null
+helm repo update prometheus-community grafana >/dev/null
 
-step "waiting for ExternalDNS to detect the service/ingress"
-sleep 20
+step "creating namespace"
 
-step "RESULT — DNS records ExternalDNS decided to create"
-kubectl -n "${NS}" logs deployment/"${APP}" -c "${APP}" \
-  | grep -iE "shop.example.com|CREATE|record|endpoint" \
-  | tail -n 20 \
-  || warn "No matching ExternalDNS log lines yet. Re-check with: kubectl -n ${NS} logs -f deploy/${APP} -c ${APP}"
+kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
 
-title "Done"
+step "installing Loki + Promtail"
 
-info "ExternalDNS is running with the inmemory provider."
-info "It will log DNS records it WOULD create, but it will not update real DNS."
-info "In production, replace --provider=inmemory with aws/cloudflare/google/etc. and provide credentials."
-info "For global load balancing across clusters, see the K8GB section in the README."
-info "Clean up: ./cleanup.sh"
+helm upgrade --install loki grafana/loki-stack -n "$NS" \
+  --set grafana.enabled=false \
+  --set prometheus.enabled=false \
+  --set promtail.enabled=true \
+  --set loki.persistence.enabled=false \
+  --timeout 10m
+
+step "checking Loki service"
+
+kubectl -n "$NS" get svc | grep -E '^loki\s|loki' || true
+
+step "installing Prometheus + Grafana + Alertmanager"
+
+helm upgrade --install kps prometheus-community/kube-prometheus-stack -n "$NS" \
+  -f monitoring-values.yaml \
+  --timeout 15m
+
+step "waiting for Grafana"
+
+if ! kubectl -n "$NS" rollout status deploy/kps-grafana --timeout=600s; then
+  diagnose_grafana
+  exit 1
+fi
+
+step "checking monitoring pods"
+
+kubectl -n "$NS" get pods -o wide
+
+GRAFANA_PASS="$(
+  kubectl -n "$NS" get secret kps-grafana \
+    -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d || true
+)"
+
+title "Monitoring ready"
+
+info "Grafana:"
+info "  kubectl -n monitoring port-forward svc/kps-grafana 3000:80"
+info ""
+info "Open:"
+info "  http://localhost:3000"
+info ""
+info "Login:"
+info "  username: admin"
+info "  password: ${GRAFANA_PASS:-admin}"
+info ""
+info "Metrics:"
+info "  Dashboards -> Kubernetes / Compute Resources / Namespace (Pods)"
+info ""
+info "Logs:"
+info "  Explore -> Loki -> query:"
+info "  {namespace=\"kube-system\"}"
+info ""
+info "Alertmanager:"
+info "  kubectl -n monitoring port-forward svc/kps-kube-prometheus-stack-alertmanager 9093:9093"
+info "  http://localhost:9093"
+info ""
+info "Clean up:"
+info "  ./cleanup.sh"
